@@ -1,0 +1,1034 @@
+---
+title: "Assignment 2"
+author: "Group 5"
+date: "September 18, 2019"
+output: html_document
+---
+
+```{r setup, include=FALSE, results = FALSE}
+# The knitr options determine how each chunk of code is handled in an RMarkdown file
+# See https://yihui.name/knitr/options/
+knitr::opts_chunk$set(echo = TRUE)
+
+# Reset the environment to avoid using old dataframes, variables etc.
+rm(list=ls())
+
+# This section is reserved for adding libraries used throughout the file. Any new libraries will be added here
+# at the beginning of the code so they are easy to find / amend in the future.
+library(tidyverse)        # loads lots of useful packages
+library(GGally)
+library(ggpubr)
+
+library(kableExtra)
+library(ggcorrplot)
+library(e1071)
+library(MASS)
+library(broom)
+library(lubridate)
+library(randomForest)
+
+# Resolves the conflict between the select functions in dplyr and MASS packages.
+dselect <- dplyr::select
+
+# Load functions for working with data
+source("Functions.R")
+```
+
+```{r import the file and investigate the variable classes, echo=FALSE}
+# Import data from source directory
+data <- read.csv("final_data.csv",
+                 #fileEncoding = "latin1"       #fileEncoding is so this runs on Macs
+                 ) 
+
+# Investigate how the columns have been imported, showing the data types (class) for each
+data_classes <- do.call(rbind, lapply(lapply(data, class), data.frame,
+                                      stringsAsFactors=FALSE))
+# Give the column a new, meaningful name
+colnames(data_classes) <- c('Variable Type')
+```
+The following table shows the list of variables and their initial data type classification. 
+
+```{r investigate data types, echo=FALSE}
+# Show the data types initially assigned to the variables
+kable(data_classes, format = 'markdown', digits = 2, align = 'c')
+```
+
+Investigate the dataset dimensions to understand the number of variables and observations.
+```{r investigate data set dimensions, echo=FALSE, paged.print=FALSE}
+dim(data)
+```
+We can see the initial dataset contains `r nrow(data)` observations and `r ncol(data)` variables. By using the data dictionary provided for the variables `LCDataDictionary.xls`, we can assign correct data types for each and begin data cleansing activities to arrive at a final set of variables to continue analysis.
+
+# Data Cleansing
+
+Data cleansing activities for this project will include:
+
+1. Initial removal of unnecessary variables 
+2. Correcting data types
+3. Dealing with missing values
+
+## Initial removal of unnecessary variables.
+
+Initially, the data dictionary was consulted and each variable's importance was discussed in terms of its value to the model. Here it is important to keep in mind that our objective is to create a predictive model that will be able to determine whether or not a new customer will fail to pay back the loan issued by the bank. In this context, only variables available at loan application will be considered. Consequently, the following variables were considered unnecessary, with justification shown below:
+
+*id =* unique identifier with no predictive power
+*member_id =* unique identifier for borrower with no predictive power
+*x =* unique row identifier with no predictive power
+*last_pymnt_d =* not applicable to outcome from business perspective
+*last_pymnt_amnt =* not applicable to outcome from business perspective
+*next_pymnt_d =* not applicable to outcome from business perspective
+*total_pymnt_inv =* not applicable to outcome from business perspective
+*zip_code = * not special evaluation
+
+These variables were removed resulting in a dataset of dimensions:
+
+```{r drop unnecessary variables, echo=FALSE}
+data <- dselect(data,-c("X",
+                      "id",
+                      "member_id",
+                      "last_pymnt_d",
+                      "last_pymnt_amnt",
+                      "next_pymnt_d",
+                      "total_pymnt_inv",
+                      "zip_code"))
+
+dim(data)
+```
+
+The new data set now contains `r nrow(data)` observations and `r ncol(data)` variables.
+
+## Correcting Data types
+
+This section will focus on the data types of each variable. The variable `revol_util` contains a percent (%) character which should be removed. 
+
+```{r, echo=FALSE}
+data$revol_util <- as.character(data$revol_util)
+data$revol_util <- gsub( "%", "", as.character(data$revol_util))
+```
+
+Then, we convert each variable to the class it should be for our visualisation and later analysis.
+
+```{r assign correct data types to variables, echo=FALSE}
+data <- data %>%
+    mutate(loan_amnt = as.numeric(data$loan_amnt), #Numeric
+           funded_amnt = as.numeric(data$funded_amnt), #Numeric
+           term = factor(term, levels = c("36 months", "60 months"), ordered = TRUE), #Ordered Factor
+           int_rate = as.numeric(data$int_rate), #Numeric
+           installment = as.numeric(data$installment),# Numeric
+           emp_length = factor(emp_length,
+                           levels = c("< 1 year", "1 year", "2 years", "3 years", "4 years", "5 years",
+                                      "6 years", "7 years", "8 years", "9 years", "10+ years"),
+                           ordered = TRUE), #Ordered factor
+           emp_length = as.factor(data$emp_length),
+           home_ownership = as.factor(data$home_ownership),#Factor
+           annual_inc = as.numeric(data$annual_inc), #Numeric
+           verification_status = as.factor(data$verification_status), #Factor
+           loan_status = as.factor(data$loan_status), #Factor
+           purpose = as.factor(data$purpose), #Factor
+           addr_state = as.factor(data$addr_state), #Factor
+           dti = as.numeric(data$dti), #Numeric
+           delinq_2yrs = as.integer(data$delinq_2yrs),#Count
+           inq_last_6mths = as.integer(data$inq_last_6mths), #Count
+           mths_since_last_delinq = as.numeric(data$mths_since_last_delinq), #Count
+           open_acc = as.integer(data$open_acc), #Count
+           pub_rec = as.integer(data$pub_rec), #Integer
+           revol_bal = as.numeric(data$revol_bal), #Numeric
+           revol_util = as.numeric(data$revol_util), #Numeric
+           total_acc = as.integer(data$total_acc), #Integer
+           total_pymnt = as.numeric(data$total_pymnt), #Numeric
+           
+           #Handling dates when customer issued the loan.
+           issue_d_totalmonths = as.integer(format(parse_date_time(data$issue_d, orders = c('b-y', 'y-b')),"%Y")) * 12 +
+             as.integer(format(parse_date_time(data$issue_d, orders = c('b-y', 'y-b')),"%m")),
+           
+           #Handling Dates when customer opened Credit line. 
+           earliest_cr_line_totalmonths = as.integer(format(parse_date_time(data$earliest_cr_line, orders = c('b-y', 'y-b')),"%Y")) * 12 +
+             as.integer(format(parse_date_time(data$earliest_cr_line, orders = c('b-y', 'y-b')),"%m")),
+           earliest_cr_line = parse_date_time(data$earliest_cr_line, orders = c('b-y', 'y-b')),
+           months_with_cr_line = as.integer(issue_d_totalmonths - earliest_cr_line_totalmonths))
+
+data$months_with_cr_line <- ifelse(data$months_with_cr_line<0,data$months_with_cr_line + 1200, data$months_with_cr_line)
+
+data <- dselect(data,-c("issue_d"))
+data <- dselect(data,-c("issue_d_totalmonths"))
+data <- dselect(data,-c("earliest_cr_line")) 
+data <- dselect(data,-c("earliest_cr_line_totalmonths"))
+data <- dselect(data,-c("last_credit_pull_d"))
+```
+
+
+Using the newly created value `months_with_cr_line` instead of the following date-related variables:
+
+- `issue_d`
+- `earliest_cr_line`
+- `last_credit_pull_d`
+
+which were removed from the data set.
+
+It is noted that there were some missing values introduced by coercion however these will be addressed in a separate section. The new classes are:
+
+```{r echo=FALSE}
+classes <- lapply(data, class)
+data_classes <- do.call(rbind, lapply(classes, data.frame, stringsAsFactors=FALSE))
+colnames(data_classes) <- c('Variable Type')
+kable(data_classes, format = 'markdown', digits = 2, align = 'c')
+```
+
+## Dealing with missing values
+
+To gain an appreciation for the number of missing values across the data set, we investigate the total number per row to determine if some observations are salvageable by imputation or not. Those that aren't will be removed entirely.
+
+```{r count missing values across dataset, echo=FALSE}
+# Count the number of missing values and number of rows containing them
+na_count <- apply(data, 1, function(x) sum(is.na(x)))
+t <- table(na_count)
+
+# Print the results in a nice format
+kable(t, format = 'markdown', digits = 2, align = 'c')
+
+# Tidy up
+rm(t)
+```
+
+The table above shows the number of rows (right hand side) that contain missing values and the number of missing values (left hand side). We can see the first entry indicates that there are 14,094 rows with no missing values (0). The last entry shows there is 1 row with 15 missing values. Where a row contains many missing values, its usefulness is limited. Consequently, the row containing 15 missing values will be removed.
+
+```{r delete rows with too many missing values, echo=FALSE}
+#Deleting Row with 16 Nan Values.
+data <- data[-c(1,2),]
+```
+
+Next, we'll check the same thing but for columns. Where there are many missing values for a column, the column must be imputed with sensible values or removed if there are simply too many. 
+
+```{r investigate missing values, echo=FALSE}
+Nans <- as.data.frame(sapply(data, function(x) sum(is.na(x))))
+Nans$Columns <- rownames(Nans)
+row.names(Nans) <- NULL
+colnames(Nans) <- c('Frequencies','Variables')
+Nans_data <- Nans[, c(2, 1)] %>% top_n(7)
+t <- Nans_data[order(-Nans_data$Frequencies),]
+
+kable(t, format = 'markdown', digits = 2, align = 'c')
+```
+
+The columns with missing values will be handled as described below.
+
+*mths_since_last_delinq:* The variable will be grouped into four categories: low (up to 40 months), medium (40-80 months), high (81-120 months) and very_high (+120 months). Missing values will be interpreted as "never having been delinquent" and will receive a value of 121, placing it in the "very_high" category. Missing values will be assigned the value "not provided".
+
+*revol_util:* This variable should be imputed with the median value.
+
+*revol_bal:* This variable should be imputed with the median value. 
+
+*annual_inc:* This variable should be imputed with the median value. 
+
+```{r impute variables with median values, echo=FALSE}
+# Replaced values for emp_length and "last_pymnt_d"
+data$emp_length = factor(data$emp_length,
+                         levels = c("< 1 year", "1 year", "2 years",
+                                    "3 years", "4 years", "5 years", "6 years",
+                                    "7 years", "8 years", "9 years", "10+ years",
+                                    "not provided"))
+
+# Update the "NA" values in employment_length to "not provided"
+data$emp_length[is.na(data$emp_length)] <- "not provided"
+
+# Group missing values for mths_since_last_delinq into categories, low, medium, high and very high
+data <- data %>%
+  mutate(mths_since_last_delinq = ifelse(is.na(mths_since_last_delinq), 121, mths_since_last_delinq), 
+         mths_since_last_delinq = ifelse(mths_since_last_delinq < 40, 'Low',
+                                         ifelse(mths_since_last_delinq < 80, 'Medium', 
+                                                ifelse(mths_since_last_delinq < 120, 'High',
+                                                       'Very_High'))))
+
+# Turn newly categorised variables into an ordered factor
+data$mths_since_last_delinq = factor(data$mths_since_last_delinq,
+                         levels = c("Low", "Medium", "High", "Very_High"))
+
+# Now create a list of columns with >0 missing values
+list_na <- colnames(data)[ apply(data, 2, anyNA) ]
+
+# For this list, create a median value that we will impute
+median_missing <- apply(data[,colnames(data) %in% list_na],2, median, na.rm =  TRUE)
+
+data <- data %>%
+            mutate(annual_inc  = ifelse(is.na(annual_inc), as.numeric(median_missing[1]), annual_inc), 
+            revol_bal = ifelse(is.na(revol_bal), as.numeric(median_missing[2]), revol_bal),
+            revol_util = ifelse(is.na(revol_util), as.numeric(median_missing[3]), revol_util))
+
+kable(median_missing, format = 'markdown', digits = 2, align = 'c')
+```
+
+Having fixed all the missing values, we derive a final data set to begin exploratory data analysis. One last look at the dataset dimensions shows it contains `r nrow(data)` observations and `r ncol(data)` variables.
+```{r re-investigate data set dimensions, echo=FALSE, paged.print=FALSE}
+dim(data)
+```
+
+Lastly, we export this for convenience so it can be imported into future analysis documents.
+```{r echo=FALSE}
+cat("Writing... ")   # More information for the user
+save(data = data, file = "defaults_data.rda")
+cat("Completed.")                            # Confirm completed
+
+#Remove objects except data
+rm(classes, data_classes, Nans, Nans_data, list_na, median_missing, na_count, t)
+```
+
+
+```{r load r data object}
+# Load data frame from previously saved data object
+load("defaults_data.rda")
+```
+
+Perform a quick class check on the data set.
+```{r list of variables for EDA, echo=FALSE}
+classes <- lapply(data, class)
+data_classes <- do.call(rbind, lapply(classes, data.frame, stringsAsFactors=FALSE))
+colnames(data_classes) <- c('Variable Type')
+t <- data_classes
+kable(t, format = 'markdown', digits = 2, align = 'c')
+
+# Tidy up
+rm(classes, data_classes, t)
+```
+
+# Exploratory Data Analysis 
+
+## Analysis of continuous variables
+
+The continuous variables were categorised and binned so that bar plots could be produced. Each plot shows the frequency of observations in each category (bar), the proportion of failures (repay_fail = 0) in each category and the mean failure rate for the entire variable (red line).
+
+```{r plot all continuous variables, echo=FALSE, fig.height=10, fig.width=10}
+# Plot all of the continuous variables and put them into one plane
+
+# These are all the continuous variables in the data set
+
+# Final code for when "delinq_2yrs" is working
+fctr_cols<-c("loan_amnt", "funded_amnt", "funded_amnt_inv", "int_rate", "installment", "annual_inc", "dti", "revol_bal", "revol_util", "total_pymnt", "total_rec_prncp", "total_rec_int")
+
+# Container to store the plots as they're created
+plot_list<-c()
+i=1
+
+# Plot each one, adding them to the container
+for(col in fctr_cols){
+  #print(col)
+  p<-plot_cont_var(data,col,bins=10,scale=25000)
+  plot_list[[i]]<-p
+  i<-i+1
+}
+
+# Place in one plot
+ggarrange(plotlist=plot_list,ncol = 3,nrow = (length(fctr_cols)/3)+1)
+
+# For printing singularly
+# plot_cont_var(data, "delinq_2yrs", bins=10, scale=25000)
+
+# Tidy up
+rm(fctr_cols, col, i, p)
+```
+
+There are a total of `r length(plot_list)` plots that represent all numerical variables in the data set. Those variables where the repayment failure dots appear level across categories show a consistent repayment failure rate. We see that several of the variables show a clear upward trend including `int_rate`, `funded_amnt` and `installment` indicating that as these values increase, so does the repayment failure rate. some show a less stark upward trend such as `revol_util`. Others still, show a downward trend. For example, the plots for `total_payment`, indicates that as the values increase, the rate of repayment failure drops.
+
+Now that we have an initial understanding of repayment failure rates for continuous variables, any correlation between them should be explored. We aim to eliminate highly correlated variables from our final feature list so that we are not unnecessarily including variables with similar predictive power in the model. A correlation matrix showing the strength (magnitude) and direction (negative / positive) for each variable is included in the following image:
+
+```{r generate correlation plot, echo=FALSE, fig.height = 6, fig.width = 10}
+# Create correlation matrix for continuous variables
+data_continuous <- dselect(data, c("loan_amnt", "funded_amnt", "funded_amnt_inv", "int_rate", "installment", "annual_inc", "dti", "revol_bal", "revol_util", "total_pymnt", "total_rec_prncp", "total_rec_int", "delinq_2yrs", "inq_last_6mths", "open_acc", "total_acc", "months_with_cr_line"))
+
+corr <- round(cor(data_continuous), 1)
+p.mat <- cor_pmat(data_continuous)
+ggcorrplot(corr, lab = TRUE, type = "lower", p.mat = p.mat)
+
+# Tidy up
+rm(corr, p.mat)
+```
+
+The image shows that there are some variables with a strong correlation. For instance, `loan_amnt` is highly correlated with six other variables: `funded_amnt`, `funded_amt_inv`, `installment`, `total_pymnt`, `total_rec_prncp` and `total_rec_int`. Recall that each of these variables is closely related to the amount the borrower repays to the lender. Thus, this is not unexpected. Investigating the model performance for each of these variables individually may indicate which is best to use in the combined model.
+
+```{r univariate analysis of first highly correlated variables, echo=FALSE}
+# Models were created for the following highly correlated continuous variables:
+# loan_amnt, installment, total_pymnt
+
+# Collect variables to model
+model_vars = c("loan_amnt", "funded_amnt", "funded_amnt_inv", "installment", "total_pymnt", "total_rec_prncp", "total_rec_int")
+
+# Create a container for our models
+model_list = list()
+i = 1
+
+# For each variable we collected
+for (var in model_vars){
+  # Model it against our response variable
+  model <- bi_model(data, "repay_fail", var)
+  model_list[[i]] <- model
+  i <- i+1
+  
+  # And print some compact to review
+  cat("=====")
+  print(model$formula)
+  print(tidy(model))
+  cat(paste("AIC", round(model$aic)))
+  cat("\n")
+}
+
+rm(model_vars, model_list, model, var, i)
+```
+
+The output shows that coefficients in all but one of the modesl are statistically significant. The exception is for `funded_amnt_inv` with a p-value of 0.0587. Models with the lowest AIC are considered to be better fits for the data. The variables used to create them in order of goodness-of-fit were:
+
+| Variable | AIC |
+|---|---|
+|total_rec_prncp|25370|
+|total_pymnt|29414|
+|loan_amnt|32662|
+|funded_amnt|32670|
+|installment|32712|
+|total_rec_inc|32717|
+|funded_amnt_inv|32725|
+
+Based on these values, we can see that `total_rec_prncp` data fits the model the best. However, given this variable does not reflect applicants' characteristics nor behaviour, its usefulness is in question as confirmed by a subject matter expert from the Bank of Queensland consulted by the group. Further advice from the expert indicated that `installment` has historical importance when assessing credit risk. As such, it will be kept among the high correlated variables analysed. The AIC and p-values assessed do not disqualify its use (AIC 32712, p-value 0.0000493.
+
+A new correlation matrix is produced to confirm the remaining continuous variables are not highly correlated.
+
+```{r reproduce correlation matrix for remaining variables, echo=FALSE}
+data_continuous <- dselect(data_continuous, -c("loan_amnt", "funded_amnt", "funded_amnt_inv", "total_pymnt", "total_rec_prncp", "total_rec_int"))
+
+corr <- round(cor(data_continuous), 1)
+p.mat <- cor_pmat(data_continuous)
+ggcorrplot(corr, lab = TRUE, type = "lower", p.mat = p.mat)
+
+# Tidy up
+rm(corr, p.mat)
+```
+
+Here we see acceptable correlation scores for each of the variables. Satisfied with this list, we refine our overall data set.
+```{r remove highly correlated variables, echo=FALSE}
+data <- dselect(data, -c("loan_amnt", "funded_amnt", "funded_amnt_inv", "total_pymnt", "total_rec_prncp", "total_rec_int"))
+classes <- lapply(data, class)
+data_classes <- do.call(rbind, lapply(classes, data.frame, stringsAsFactors=FALSE))
+colnames(data_classes) <- c('Variable Type')
+t <- data_classes
+
+kable(t, format = 'markdown', digits = 2, align = 'c')
+
+# Tidy up
+rm(classes, data_classes, t)
+```
+
+Next, let's take a look at the distributions for the continuous variables using histograms.
+```{r explore distributions for continuous variables, echo=FALSE}
+
+# Collect list of variables to plot
+var_list <- c("installment", "annual_inc", "dti", "revol_bal", "revol_util")
+i = 1
+
+# Create a container for the histogram plots
+hplot_list=list()
+
+# Plot each histogram
+for (col in var_list){
+  hplot<-plot_hist(data, col)
+  hplot_list[[i]]<-hplot
+  i <- i + 1
+}
+
+# Place in one plot
+ggarrange(plotlist = hplot_list, ncol = 3,nrow = (length(hplot_list)/3)+1)
+
+# Tidy up
+rm(hplot, hplot_list, col, var_list, i)
+```
+
+The histograms show some interesting distributions. For variables `installment`, `dti` and `revol_util`, the distributions are approximately normal with some skewing for `installment`. However, some transformation for variables `annual_inc` and `revol_bal` may be required as the majority of the observations are very low with some scattered high values.
+
+```{r log transform continuous variables, echo=FALSE}
+# Collect list of variables to plot
+var_list <- c("annual_inc", "revol_bal")
+i = 1
+
+# Create a container for the histogram plots
+hplot_list=list()
+
+# Plot each histogram but also plot the un-logged version first
+for (col in var_list){
+  # Plot non-transformed first
+  hplot<-plot_hist(data, col)
+  hplot_list[[i]]<-hplot
+  i <- i + 1
+  
+  # Then plot the transformed version next to it
+  var_log <- paste("log(", col, ")", sep = "")
+  hplot<-plot_hist(data, var_log)
+  hplot_list[[i]]<-hplot
+  i <- i + 1
+}
+
+# Place in one plot
+ggarrange(plotlist = hplot_list, ncol = 2, nrow = (length(hplot_list)/2)+1)
+
+# Tidy up
+rm(col, hplot, hplot_list, var_log)
+```
+
+After transforming the two variables, we see a much more normal distribution than we previously saw. Consequently, the transformed version of the variables will be kept for modelling purposes.
+
+```{r update data set with transformed variable, echo=FALSE}
+# Create new columns for the transformed variables
+
+# Add one to revol_bal because this has some zero values
+data$revol_bal <- data[, "revol_bal"] + 1
+
+data %>%
+  mutate(annual_inc_log = log(annual_inc),
+         revol_bal_log = log(revol_bal)
+  ) -> data
+```
+
+It's important to note that `revol_bal` contained 976 values equal to 0. To fix this, 1 was added to each observation before transformation.
+
+To round off the analysis, binomial GLMs were created for continuous variables not already modelled to understand how the variables relate to the response variable alone. Those include:
+
+-`int_rate`
+- `log of annual_inc`
+-`dti`
+-`revol_bal`
+- `log of revol_util`
+-`last_pymnt_amnt`
+
+```{r univariate analysis for remaining continuous variables, echo=FALSE}
+# Models were created for the following highly correlated continuous variables:
+# int_rate, annual_inc_log, dti, revol_bal_log, revol_util
+
+# Collect variables to model
+model_vars = c("int_rate", "annual_inc_log", "dti", "revol_bal", "revol_util")
+
+# Create a container for our models
+model_list = list()
+i = 1
+
+# For each variable we collected
+for (var in model_vars){
+  # Model it against our response variable
+  model <- bi_model(data, "repay_fail", var)
+  model_list[[i]] <- model
+  i <- i+1
+  
+  # And print some compact to review
+  cat("=====")
+  print(model$formula)
+  print(tidy(model))
+  cat(paste("AIC", round(model$aic)))
+  cat("\n")
+}
+
+rm(model_vars, model_list, model, var, i)
+```
+
+A summary of the output of the models is shown below. 
+
+| Variable | AIC |
+|---|---|
+|int_rate|31179|
+|annual_inc_log|32564|
+|dti|32659|
+|revol_bal_log|32716|
+|revol_util|32380|
+
+Overall, the models shared similar AIC values ranging from 31179 for `int_rate` up to 32380 for `revol_util`. Each model generated showed co-efficients p-levels <0.05 in all cases.
+
+## Checking linearity
+The following section evaluates each continuous variable from the reduced dataset. The behaviours of each variable versus the target variable is plotted to investigate linear relationships between the variable and the logit transformation of our target variable. The following images show the behaviour.
+
+```{r echo=FALSE, fig.height = 12, fig.width = 8}
+y <- data$repay_fail
+
+x1 <- data$installment
+x2 <- data$int_rate
+x3 <- data$dti
+x4 <- data$revol_util
+x5 <- data$annual_inc_log
+x6 <- data$revol_bal_log
+
+g1 <- cut(x1,breaks = quantile(x1,seq(0,100,10)/100))
+g2 <- cut(x2,breaks = quantile(x2,seq(0,100,10)/100))
+g3 <- cut(x3,breaks = quantile(x3,seq(0,100,10)/100))
+g4 <- cut(x4,breaks = quantile(x4,seq(0,100,10)/100))
+g5 <- cut(x5,breaks = quantile(x5,seq(0,100,10)/100))
+g6 <- cut(x6,breaks = quantile(x6,seq(0,100,10)/100))
+
+ym1 <- tapply(y,g1,mean)
+ym2 <- tapply(y,g2,mean)
+ym3 <- tapply(y,g3,mean)
+ym4 <- tapply(y,g4,mean)
+ym5 <- tapply(y,g5,mean)
+ym6 <- tapply(y,g6,mean)
+
+xm1 <- tapply(x1,g1,mean)
+xm2 <- tapply(x2,g2,mean)
+xm3 <- tapply(x3,g3,mean)
+xm4 <- tapply(x4,g4,mean)
+xm5 <- tapply(x5,g5,mean)
+xm6 <- tapply(x6,g6,mean)
+
+ymp1 <- log(ym1/(1-ym1))
+ymp2 <- log(ym2/(1-ym2))
+ymp3 <- log(ym3/(1-ym3))
+ymp4 <- log(ym4/(1-ym4))
+ymp5 <- log(ym5/(1-ym5))
+ymp6 <- log(ym6/(1-ym6))
+
+par(mfrow = c(3,2))
+
+plot(xm1,ymp1, ylab = "log ym/1-ym", xlab = "Installment") #Plotting logit
+plot(xm2,ymp2, ylab = "log ym/1-ym", xlab = "Interest Rate") #Plotting logit
+plot(xm3,ymp3, ylab = "log ym/1-ym", xlab = "DTI") #Plotting logit
+plot(xm4,ymp4, ylab = "log ym/1-ym", xlab = "Revol Util") #Plotting logit
+plot(xm5,ymp5, ylab = "log ym/1-ym", xlab = "Log of Annual Income") #Plotting logit
+plot(xm6,ymp6, ylab = "log ym/1-ym", xlab = "Log of Revolving Balance") #Plotting logit
+
+# Tidy up
+rm(x1, x2, x3, x4, x5, x6,
+   g1, g2, g3, g4, g5, g6,
+   ym1, ym2, ym3, ym4, ym5, ym6,
+   xm1, xm2, xm3, xm4, xm5, xm6,
+   ymp1, ymp2, ymp3, ymp4, ymp5, ymp6)
+```
+
+The plots show some obvious trends. For instance:
+
+The variables with a _positive correlation_, that is, as it increases in value so does the rate of repayment failure, are:
+
+- Interest Rate
+- DTI
+- Revol Util
+
+Installment also appears to have a _positive correlation_ with repayment failure however this isn't so clear for lower installment values.
+
+The log of annual income appears to have a _negative correlation_ with the target variable, that is, as it increases in value, the rate of repayment failure decreases. This is also true for the log of revolving balance with some exceptions for lower values.
+
+## Analysis of categorical variables
+
+```{r,fig.width=10, fig.height=10, echo=FALSE}
+fctr_cols<-c('term','emp_length','home_ownership','verification_status','loan_status','purpose',
+             'mths_since_last_delinq', 'pub_rec', 'delinq_2yrs', 'inq_last_6mths', 'addr_state',
+             'open_acc', 'total_acc', "months_with_cr_line")
+plot_list<-c()
+i=1
+
+for(col in fctr_cols){
+  p<-plot_cat_var(data,col,scale=20000)
+  plot_list[[i]]<-p
+  i<-i+1
+}
+
+ggarrange(plotlist=plot_list,ncol = 3,nrow = (length(fctr_cols)/3)+1)
+
+# For analysis of individual variables
+#p <- plot_cat_var(data, "loan_status", scale = 20000)
+#p
+
+# Tidy up
+rm(col, fctr_cols, var_list, p)
+```
+
+As for the continuous variables, we see that the placement of the dots indicating repayment failure rates is consistent for many of the variables. For instance, `verification_status`, `purpose` and `mths_since_last_delinq` fall into this category. There are some interesting observations to be made about the remaining plots. `term` appears to increase over the two categories, indicating that there are more repayment failures for 60 month term loans than for 36 month term.
+
+For other variables, we see some fluctuation in trends. For example, `home_ownership` appears roughly even except in the none and other categories for which there are very few observations. A similar story is found for some variables involving counts of borrower behaviours. For example, the vast majority of observations for derogatory public records (`pub_rec`) and delinquencies in the last 2 years (`delinq_2yrs`), are for lower counts. For these types of variables, re-grouping (or binning), may provide us with more insight into the repayment failure.
+
+Plots for other variables are more difficult to interpret. For example, repayment failure rates for `inq_last_6mths`, `open_acc` and `total_acc` appear consistent for lower values but then differ widely for larger values. The `addr_state` variable shows a relatively consistent repayment rate across US states with some major exceptions both lower and higher than the average repayment failure rate across the country.
+
+Finally, `loan_status` appears to define the response variable with categories either having a repayment failure rate of 0 or 1. Therefore, its usefulness in the model creation will not be included.
+
+```{r remove perfect predictor categorical variables, echo=FALSE}
+# Remove perfect predictor variable
+data <- dselect(data, -c("loan_status"))
+```
+
+Univariate modelling was performed for the categorical variables to gain an understanding of their goodness of fit against the response variable.
+```{r univariate analysis for remaining categorical variables, echo=FALSE}
+# Collect variables to model
+model_vars <- c('term','emp_length','home_ownership','verification_status','purpose', 'mths_since_last_delinq', 'pub_rec', 'delinq_2yrs',
+                'inq_last_6mths', 'addr_state', 'open_acc', 'total_acc', "months_with_cr_line")
+
+# Create a container for our models
+model_list = list()
+i = 1
+
+# For each variable we collected
+for (var in model_vars){
+  # Model it against our response variable
+  model <- bi_model(data, "repay_fail", var)
+  model_list[[i]] <- model
+  i <- i+1
+  
+  # And print some compact to review
+  cat("=====")
+  print(model$formula)
+  print(tidy(model))
+  cat(paste("AIC", round(model$aic)))
+  cat("\n")
+}
+
+rm(model_vars, model_list, model, var, i)
+```
+
+The following table summarises the AICs for each model generated.
+
+| Variable | AIC |
+|---|---|
+|term|32083|
+|emp_length|32697|
+|home_ownership|32712|
+|verification_status|32692|
+|purpose|32399|
+|mths_since_last_delinq|32681|
+|pub_rec|32641|
+|delinq_2yrs|32713|
+|inq_last_6mths|32318|
+|addr_state|32661|
+|open_acc|32727|
+|total_acc|32712|
+|months_with_cr_line|32713|
+
+Many of the models showed coefficients that were not considered significant. In the first instance, these were excluded from the final list of variables unless expert advice contradicted this judgement. The variables excluded here include:
+
+- emp_length
+- addr_state
+
+# Feature Selection
+
+Two method were used to identify the features to be used during the modelling process. First step-wise regression using AIC was conducted over the subset of variables. Second, a random forest algorithm was applied to the same set of data and importance scores based on the mean gini was identified.
+
+```{r variable selection with stepwise regression using AIC, include=FALSE}
+
+# Perform forward and backward stepwise regression to identify with best fit
+final_vars <- c("installment", "int_rate", "term", "inq_last_6mths", "home_ownership", "annual_inc_log",
+                "verification_status", "purpose", "dti", "revol_bal_log", "revol_util", "months_with_cr_line",
+                "delinq_2yrs", "mths_since_last_delinq", "emp_length", "pub_rec", "repay_fail")
+
+# Remember to log "annual_inc" and "revol_bal" when creating the step model
+model_df <- dselect(data, c(final_vars))
+
+# Step AIC
+#model <- glm(data = data_model, repay_fail ~ installment + int_rate + term + inq_last_6mths + home_ownership + log(annual_inc) + verification_status + purpose + dti + revol_util + delinq_2yrs + mths_since_last_delinq + emp_length,  family="binomial")
+
+model <- glm(data = model_df, repay_fail ~ .,  family="binomial")
+
+summary(model)
+
+# Run the stepwise regression model
+step <- stepAIC(model, trace = FALSE)
+save(step, file = "Step_Model.rda")
+
+#load("Step_Model.rda")
+summary(step)
+step$anova
+
+
+
+# Use varImp() function from caret package to determine which are the most important variables in glm.
+# Original model
+imp_vars_model <- varImp(model)
+imp_vars_model <- data.frame(overall = imp_vars_model$Overall,
+           names   = rownames(imp_vars_model))
+imp_vars_model<-imp_vars_model[order(imp_vars_model$overall,decreasing = T),]
+
+# stepAIC model
+imp_vars_step <- varImp(step)
+imp_vars_step <- data.frame(overall = imp_vars_step$Overall,
+           names   = rownames(imp_vars_step))
+imp_vars_step <- imp_vars_step[order(imp_vars_step$overall,decreasing = T),]
+
+# Plot the 5 most important variables
+imp_vars_step$names <- as.factor(imp_vars_step$names)
+
+i<-ggplot(head(imp_vars_step,5), aes(x = reorder(names, -overall), y = overall))+
+  geom_col(stat="identity", fill = "lightskyblue3")+
+  labs(x = "Variable",
+       y = "Importance Score",
+       title = "Top 5 Important Variables Using AIC Step-wise Regression")+
+  theme_bw()+
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+```
+
+```{r variable selection with random forest algorithm, echo=FALSE}
+
+# Random forest 
+# Import the random forest library and fit a model and create an importance based on mean decreasing gini
+
+fit_rf = randomForest(as.factor(repay_fail) ~ ., data=model_df)
+save(fit_rf, file = "RF_Model.rda")
+#load("RF_Model.rda")
+
+fi <- as.data.frame(importance(fit_rf))
+fi <- data.frame(overall = fi$MeanDecreaseGini, names = rownames(fi))
+fi<-fi[order(fi$overall,decreasing = T),]
+
+# Plot the 7 most important variables
+#fi <- as.factor(fi)
+
+i2<- ggplot(head(fi,7), aes(x = reorder(names, -overall), y = overall))+
+  geom_col(stat="identity", fill = "lightskyblue3")+
+  labs(x = "Variable",
+       y = "Importance Score",
+       title = "Top 7 Important Variables Using Random Forest Feature Selection")+
+  theme_bw()+
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+
+ggarrange(i, i2)
+
+rm(data_continuous, fi, fit_rf, i, i2, imp_vars_model, imp_vars_step, model, plot_list, step)
+```
+
+The image above shows two separate plots. The plot on the left shows the 5 most important variables using the AIC step-wise regression feature selection technique. The first three variables have relatively similar importance scores with a noticeable drop in the fourth variable (term.L) and again in the fifth (purposesmall_business). The plot on the right presents the top 7 variables resulting from the random forest feature selection algorithm. `int_rate` clearly has the highest score and the following 6 (`revol_util` through to `months_with_cr_line`) have very similar importance scores. Therefore, based on both previous outputs, a final list generated by combining both set of variables is resulted and will be used on following sections. 
+
+# Modelling
+
+```{r prepping the data}
+train_data_lst <- split_data(model_df, model_df$repay_fail, train_percent = 0.7)
+train_data <- train_data_lst[[1]] #train split
+test_data <- train_data_lst[[2]] #test split
+summary(train_data)
+```
+
+At this stage we have arrived at three models.
+
+One derived from a stepAIC function:
+`int_rate`,  `annual_inc_log`,  `inq_last_6mths`, `term` and `purpose`
+
+One derived from a random forrest classifier:
+`int_rate`,  `annual_inc_log`, `revol_util`, `installment`, `revol_bal_log`, `dti` and `months_with_cr_line`
+
+One with a combination of all of the rest:
+`int_rate`,  `annual_inc_log`,  `inq_last_6mths`, `term`, `purpose`, `revol_util`, `installment`, `revol_bal_log`, `dti` and `months_with_cr_line`.
+
+The Gini scores for the three models are as follows:
+```{r final modelling}
+#plot the models derived from StepAIC and randforrest and then one with all variables
+
+step_aic_model <- glm(data = train_data, repay_fail ~ int_rate + annual_inc_log + inq_last_6mths + term + purpose, family = binomial("logit"))
+
+rand_forest_model <- glm(data = train_data, repay_fail ~ int_rate + annual_inc_log + revol_util + installment + revol_bal_log + dti + months_with_cr_line , family = binomial("logit")) 
+    
+all_vars_model <- glm(data = train_data, repay_fail ~ int_rate + annual_inc_log + inq_last_6mths + term + purpose + revol_util + installment + revol_bal_log + dti + months_with_cr_line , family = binomial("logit")) 
+
+library(MLmetrics) # for gini function
+Gini(y_pred = step_aic_model$fitted.values, y_true = train_data$repay_fail) # 0.3963166
+Gini(y_pred = rand_forest_model$fitted.values, y_true = train_data$repay_fail) #0.3495213
+Gini(y_pred = all_vars_model$fitted.values, y_true = train_data$repay_fail) # 0.402305
+```
+
+Due to how unbalanced our dataset is we will test the accuracy of our models straight away.
+
+All variable model:
+```{r conf matrix for all vars}
+predict <- predict(all_vars_model, newdata= test_data, type = 'response')
+table(test_data$repay_fail, predict > 0.5)
+
+fitted.results <- predict(all_vars_model, newdata= test_data, type='response')
+fitted.results <- ifelse(fitted.results > 0.5,1,0)
+misClasificError <- mean(fitted.results != test_data$repay_fail)
+print(paste('Accuracy',1-misClasificError))
+```
+
+StepAIC model:
+```{r conf matrix for step aic}
+predict <- predict(step_aic_model, newdata= test_data, type = 'response')
+table(test_data$repay_fail, predict > 0.5)
+
+fitted.results <- predict(step_aic_model, newdata= test_data, type='response')
+fitted.results <- ifelse(fitted.results > 0.5,1,0)
+misClasificError <- mean(fitted.results != test_data$repay_fail)
+print(paste('Accuracy',1-misClasificError))
+```
+
+Random Forrest model:
+```{r conf matrix for rand forest}
+
+predict <- predict(rand_forest_model, newdata= test_data, type = 'response')
+table(test_data$repay_fail, predict > 0.5)
+
+fitted.results <- predict(rand_forest_model, newdata= test_data, type='response')
+fitted.results <- ifelse(fitted.results > 0.5,1,0)
+misClasificError <- mean(fitted.results != test_data$repay_fail)
+print(paste('Accuracy',1-misClasificError))
+```
+
+As expected the models all have an accuracy of around 85%. As our data is unballanced and has a failure rate of 15% anyway, it could be concluded that our model is no more accurate than arbitrarily giving a loan to everyone in this dataset. Moreover, if we evaluate the recall accounted for class 1 which evaluates the ability of our classifier to detect whether a client will fail to repay his loan, we can observe than in either of three previous models, the recall % is about 2.3%, 1.9% and 0.35%. These metrics lead us to conclude that previous models are not performinf accordingly and our model does not have any classification power at all to find bad customers.
+
+As a result of previous results,  the dataset will be balanced so as to train and test our model more effectively.
+
+```{r undersampling}
+
+#adjusts for the undersampling/oversampling
+data_model_fails <- filter(model_df, model_df$repay_fail == "1") #get all fails
+data_model_fails<-data_model_fails
+
+data_model_success<-filter(model_df, model_df$repay_fail == "0") # get all sucesses
+
+data_model_random_success <- data_model_success[sample(nrow(data_model_success), nrow(data_model_fails)),] # get a random set of successes
+
+data_model_even <- rbind(data_model_fails, data_model_random_success) #makes a 50/50 dataset
+```
+
+```{r prepping the balanced data}
+#creating the balanced dataset
+
+train_data_lst_bal <- split_data(data_model_even, data_model_even$repay_fail, train_percent = 0.7)
+train_data_bal <- train_data_lst_bal[[1]]
+test_data_bal <- train_data_lst_bal[[2]]
+```
+
+```{r final balanced data modelling}
+
+step_aic_model <- glm(data = train_data_bal, repay_fail ~ int_rate + annual_inc_log + inq_last_6mths + term + purpose, family = binomial("logit")) #variables selected from step_aic model
+
+rand_forest_model <- glm(data = train_data_bal, repay_fail ~ int_rate + annual_inc_log + revol_util + installment + revol_bal_log + dti + months_with_cr_line , family = binomial("logit")) #variables selected from random_forrest
+
+all_vars_model <- glm(data = train_data_bal, repay_fail ~ int_rate + annual_inc_log + inq_last_6mths + term + purpose + revol_util + installment + revol_bal_log + dti + months_with_cr_line , family = binomial("logit")) #combination
+```
+
+The following are the Gini scores for the balanced dataset using the StepAIC, Random Forrest and All Variable models respectively:
+```{r}
+library(MLmetrics) # for gini function
+Gini(y_pred = step_aic_model$fitted.values, y_true = train_data_bal$repay_fail) # 0.3823225
+Gini(y_pred = rand_forest_model$fitted.values, y_true = train_data_bal$repay_fail) # 0.3298934
+Gini(y_pred = all_vars_model$fitted.values, y_true = train_data_bal$repay_fail) # 0.3881455
+```
+
+All variable model:
+```{r conf matrix for all vars balanced data 1}
+predict <- predict(all_vars_model, newdata= test_data_bal, type = 'response')
+table(test_data_bal$repay_fail, predict > 0.5)
+
+fitted.results <- predict(all_vars_model, newdata= test_data_bal, type='response')
+fitted.results <- ifelse(fitted.results > 0.5,1,0)
+misClasificError <- mean(fitted.results != test_data_bal$repay_fail)
+print(paste('Accuracy',1-misClasificError))
+```
+
+StepAIC model:
+```{r conf matrix for step aic balanced data}
+predict <- predict(step_aic_model, newdata= test_data_bal, type = 'response')
+table(test_data_bal$repay_fail, predict > 0.5)
+
+fitted.results <- predict(step_aic_model, newdata= test_data_bal, type='response')
+fitted.results <- ifelse(fitted.results > 0.5,1,0)
+misClasificError <- mean(fitted.results != test_data_bal$repay_fail)
+print(paste('Accuracy',1-misClasificError))
+```
+
+Random Forest model:
+```{r conf matrix for rand forest balanced data}
+predict <- predict(rand_forest_model, newdata= test_data_bal, type = 'response')
+table(test_data_bal$repay_fail, predict > 0.5)
+
+fitted.results <- predict(rand_forest_model, newdata= test_data_bal, type='response')
+fitted.results <- ifelse(fitted.results > 0.5,1,0)
+misClasificError <- mean(fitted.results != test_data_bal$repay_fail)
+print(paste('Accuracy',1-misClasificError))
+```
+
+As a result of balancing classes over our dataset, we can see that values of recall have improved significantly for all the escenatios under evaluation. For All variable model, it moved from 2.3% to 62.8%, for StepAIC model,  it moved from 1.9% to 62.7% and for Random Forest model, it mpassed from 0.35% to 61.78%. On the other hand, the best Gini score and highest accuracy belong to our model considering the following variables;
+
+`int_rate`,  `annual_inc_log`,  `inq_last_6mths`, `term`, `purpose`, `revol_util`, `installment`, `revol_bal_log`, `dti` and `months_with_cr_line`. We will now check the various link functions to compare residuals and Gini scores.
+
+```{r test link funcs}
+all_vars_model <- glm(data = train_data_bal, repay_fail ~ int_rate + annual_inc_log + inq_last_6mths + term + purpose + revol_util + installment + revol_bal_log + dti + months_with_cr_line , family = binomial(link = "logit")) #logit combination
+
+all_vars_model_p <- glm(data = train_data_bal, repay_fail ~ int_rate + annual_inc_log + inq_last_6mths + term + purpose + revol_util + installment + revol_bal_log + dti + months_with_cr_line , family = binomial(link = "probit")) #probit combination
+
+all_vars_model_c <- glm(data = train_data_bal, repay_fail ~ int_rate + annual_inc_log + inq_last_6mths + term + purpose + revol_util + installment + revol_bal_log + dti + months_with_cr_line , family = binomial(link = "cloglog")) #cloglog combination
+```
+
+The following gini score are for the logit, probit and cloglog links respectively.
+```{r test ginis}
+library(MLmetrics) # for gini function
+Gini(y_pred = all_vars_model$fitted.values, y_true = train_data_bal$repay_fail) # 0.3881455      logit
+Gini(y_pred = all_vars_model_p$fitted.values, y_true = train_data_bal$repay_fail) #0.3879629     probit
+Gini(y_pred = all_vars_model_c$fitted.values, y_true = train_data_bal$repay_fail) # 0.3873741    cloglog
+```
+
+confustion matrix for the logit link function:
+```{r conf matrix for all vars balanced data}
+#logit link
+
+predict_final <- predict(all_vars_model, newdata= test_data_bal, type = 'response') #set to predict_final for ROC curve
+table(test_data_bal$repay_fail, predict > 0.5)
+
+fitted.results <- predict(all_vars_model, newdata= test_data_bal, type='response')
+fitted.results <- ifelse(fitted.results > 0.5,1,0)
+misClasificError <- mean(fitted.results != test_data_bal$repay_fail)
+print(paste('Accuracy',1-misClasificError))
+```
+
+confustion matrix for the probit link function:
+```{r conf matrix for all vars balanced probit link}
+#probit link
+predict <- predict(all_vars_model_p, newdata= test_data_bal, type = 'response')
+table(test_data_bal$repay_fail, predict > 0.5)
+
+fitted.results <- predict(all_vars_model_p, newdata= test_data_bal, type='response')
+fitted.results <- ifelse(fitted.results > 0.5,1,0)
+misClasificError <- mean(fitted.results != test_data_bal$repay_fail)
+print(paste('Accuracy',1-misClasificError))
+```
+
+confustion matrix for the cloglog link function:
+```{r conf matrix for all vars balanced data 2}
+#cloglog link
+predict <- predict(all_vars_model_c, newdata= test_data_bal, type = 'response')
+table(test_data_bal$repay_fail, predict > 0.5)
+
+fitted.results <- predict(all_vars_model_c, newdata= test_data_bal, type='response')
+fitted.results <- ifelse(fitted.results > 0.5,1,0)
+misClasificError <- mean(fitted.results != test_data_bal$repay_fail)
+print(paste('Accuracy',1-misClasificError))
+```
+
+Despite the probit and cloglog functions having a marginally better accuracy and recall scores than the logit function this is likely due to randomness in the dataset as the logit link function has a higher GINI score.
+
+```{r Checking residuals rand forrest}
+library("DHARMa") # load residuals
+res=simulateResiduals(all_vars_model)
+plot(res)
+
+# anova(rand_forest_model, test="Chisq") #analyses deviance
+```
+
+The QQ plot seems to fit really well. The residuals lack any obvious trend and appear homogeneous. As a result, there is no need to test the other link functions any further
+
+```{r}
+library(ROCR) # for ROC curve
+ROCRpred <- prediction(predict_final, test_data_bal$repay_fail)
+ROCRperf <- performance(ROCRpred, 'tpr','fpr')
+plot(ROCRperf, colorize = TRUE, text.adj = c(-0.2,1.7))
+```
+
+When comparing this curve to the results it is clear that a Gini score of 0.388 is better than one of 0.110. Therefore, this model is selected as the best model to be used.
+
+Following the previous results, the final model results in R are displayed: below
+
+```{r}
+summary(all_vars_model)
+```
+
+The equation for the expected values of the model can be represented as follows:
+
+$$
+log(\frac{\mu_i}{1 - \mu_i }) = 2.17 + 0.107000X_1 - 0.542000X_2 + 0.147000X_3 - 1.11199X_4 + 0.327000X_5 \\\
+- 0.016600X_p1 - 0.153000X_p2 + 0.673000X_p3 + 0.673000X_p4 + 0.273000X_p5 + 0.152000x_p6 - 0.082200x_p7 + 0.470000x_p8 + 0.353000x_p9\\\
++ 0.339000x_p10 + 0.664000x_p11 + 0.898000x_p12 + 0.314000x_p13 - 0.009930x_p14 + 0.004870x_6 + 0.000167x_7 - 0.013700x_8 + 0.005280x_9 + 0.000689x_10)
+$$
+Where  ? is the expected proportion of customer failing to  repay loans and each X_# describes one of the 10 variables previously introduced. 
+
+# Findings
+
+1.A detailed and exhaustive process of cleaning, transformation and variable selection over the initial dataset is highly required,  not only to ensure the best results on modeling but also to reduce the complexity of further stages. Moreover, although several tecniques including AIC evaluation and random forest selection were applied while selecting variables, results coming from each one of those tecniques converged on a similar set of variables which allow the project to rely on those tecniques and pick up the best variables to train and evaluate further modeling efforts. 
+
+2. As was observed during the analysis, working with an unbalanced dataset may affect significantly the classification power of the trained model. Therefore, balancing the classes was an accurate decission taken by the project, it produced a better model with a highest classification power which means a better chance to detect bad customer which will be struggling to repay the loans. Finally, as was observed on results, by introducing this preprocessing activity, models improved in terms of recall from values about 0% and 2% to values about 62% to 67%.
+
+3. Recall and Accuract metric waere considered as the most important measurements to evaluate classification power of our model. By using these metrics, we were able to determine whether the model was being able to identify correctly customers with a likey bad loan repayment profile or it was just assigning a unique class to each customer. It is an important consideration across the project due to the high probability of missunderstanding of the models provided by the evaluation of only one classification metric. 
+
+4. As the coefficients resulted on our model implies, for a customer without any information at all, an odds ration of 8.77 will be defined. It means, customers will be initially defined as 8 times likely to be a bad customer. Moreover, variables such as annual income, reval balance utilization and the purpose of the credit will reduce the likelihood of customer to be considered as a failed repayment. Finally, Bank threshold over the model should be selected based on the level of risk the Bank of Queensland  wants to account for. It means that the number of customers to be classified as good or bad customers is going to depend of where the threshold and therefore the odds ratio relevance is set.
